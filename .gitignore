@@ -4,3 +4,5 @@ __pycache__/
 settings.json
 esp32file/
 .tmp_pycache/
+.mp4
+recordings/*.mp4
