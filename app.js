@@ -293,7 +293,7 @@ async function refreshRecordingsList() {
     const recordings = data.recordings || [];
 
     if (!recordings.length) {
-      renderEmptyRecordings("No recordings yet. Automatic recording creates the first playable clip after the current segment finishes.");
+      renderEmptyRecordings("No completed recordings yet. Clips are saved while someone is inside the cell and appear after the cell clears or a segment finishes.");
       return;
     }
 
