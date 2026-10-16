@@ -20,9 +20,16 @@ def load(name):
 
 deploy = load("deploy")
 kiosk = load("kiosk")
+preview_update = load("update-preview")
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_preview_refresh_keeps_playback_query_and_is_idempotent(self):
+        url = preview_update.refreshed_url("http://127.0.0.1:8080/?live=webrtc&label=a%20b")
+        self.assertIn("live=webrtc", url)
+        self.assertIn("preview_recovery=1", url)
+        self.assertEqual(preview_update.refreshed_url(url), url)
+
     def test_existing_mediamtx_service_is_reused(self):
         with patch.object(deploy.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
             files, service = deploy.mediamtx_boot_plan("rtsp://127.0.0.1:8554/pramacam", "aegixcore")

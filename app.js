@@ -17,6 +17,7 @@ const previewHost = window.location.hostname || "127.0.0.1";
 const fixedPreviewUrl = `http://${previewHost}:8889/pramacam`;
 const directVideoExtensions = [".mp4", ".webm", ".ogg", ".mov"];
 let hlsPlayer = null;
+let livePreview = null;
 let recordingHlsPlayer = null;
 let activeView = "liveView";
 let recordingFallbackClip = null;
@@ -152,10 +153,11 @@ function loadPreviewPage(url) {
   video.pause();
   video.removeAttribute("src");
   video.load();
-  video.hidden = true;
-  frame.src = url;
-  frame.hidden = false;
-  showEmptyState(false);
+  frame.hidden = true;
+  frame.removeAttribute("src");
+  video.hidden = false;
+  if (!livePreview) livePreview = new window.RecoveringPreview(video, url, showEmptyState);
+  livePreview.start();
 }
 
 function loadFixedPreview() {
@@ -334,7 +336,10 @@ function showView(targetId) {
   });
 
   if (targetId === "recordingsView") {
+    if (livePreview) livePreview.stop();
     refreshRecordingsList();
+  } else if (targetId === "liveView" && !document.hidden) {
+    loadFixedPreview();
   }
 }
 
@@ -349,6 +354,19 @@ frame.addEventListener("load", () => showEmptyState(false));
 frame.addEventListener("error", () => showEmptyState(true));
 video.addEventListener("playing", () => showEmptyState(false));
 video.addEventListener("error", () => showEmptyState(true));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (livePreview) livePreview.stop();
+  } else if (activeView === "liveView") {
+    loadFixedPreview();
+  }
+});
+window.addEventListener("pagehide", () => {
+  if (livePreview) livePreview.stop();
+});
+window.addEventListener("pageshow", () => {
+  if (activeView === "liveView" && !document.hidden) loadFixedPreview();
+});
 
 recordingEmptyState.classList.remove("is-hidden");
 loadFixedPreview();

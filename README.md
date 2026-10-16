@@ -5,6 +5,55 @@ The recording server runs as your administrator/application account (aegixcore).
 The screen automatically logs in as a separate operator account and opens the
 dashboard. ESP32 occupancy controls recording; the archive is capped at 35 GB.
 
+## Automatic preview recovery on an existing raspberrypibase Pi
+
+This recovery branch replaces the embedded WebRTC page with a locally hosted
+MediaMTX reader and a video-frame watchdog. If no frames arrive for 20 seconds
+during startup, or stop for 10 seconds after playback starts, the live connection
+is closed and retried. Retry delays grow from 2 to at most 30 seconds while the
+camera/network is down. HTTP signaling and its response bodies time out after
+8 seconds and are aborted when their preview connection is closed.
+
+Decoded video frames, rather than motion in the image, are monitored. A still
+empty cell does not cause reconnection. Leaving Live closes its connection and
+returning opens a fresh one; the recording player is independent. Old tracks,
+retry timers and frame callbacks are released. The recorder, counts, relays and
+35 GB policy are unchanged. The existing kiosk service still relaunches a browser
+which exits; this JavaScript watchdog requires a responsive browser process.
+
+Apply from the administrator account in the installed checkout:
+
+```bash
+cd /home/aegixcore/raspberrypibase
+git status --short
+git fetch origin fix/raspberrypibase-preview-recovery
+git switch --no-track -c fix/raspberrypibase-preview-recovery FETCH_HEAD
+sudo python3 scripts/update-preview.py
+```
+
+If status lists local modifications, preserve them before switching. If a command
+fails, stop and inspect the error. The update helper verifies that the server is
+installed from this folder, then restarts only the kiosk browser with a fresh
+dashboard URL so cached HTML/JavaScript cannot keep the old player. It does not
+restart the recording server, reconfigure the camera or reinstall kiosk mode.
+If a different checkout is active, it stops without changing the service config.
+The browser URL override survives reboot. No on-site wait for the fault is needed
+to install it, but check the picture once after updating.
+For later updates after this local branch already exists, switch to it with
+git switch fix/raspberrypibase-preview-recovery and use
+git pull --ff-only origin fix/raspberrypibase-preview-recovery instead of creating
+the branch again.
+
+Recovery counters/causes are logged to the browser console. This addresses
+missing preview reconnection; it does not prove the cause of a previous outage
+or repair a permanently offline camera, browser hang, power or hardware failure.
+All live-preview reader assets are local; the existing HLS recording fallback
+still uses its original Hls.js CDN script.
+
+The reader is based on official MediaMTX v1.18.2 (MEDIAMTX-LICENSE.txt), with an
+optional fetchRequest hook and handled DELETE failures for bounded, cancellable
+signaling. The WHEP endpoint remains the existing MediaMTX port 8889/pramacam.
+
 ## Install in one pass
 
 Use the existing Raspberry Pi OS Desktop device, with its existing MediaMTX
@@ -12,7 +61,7 @@ camera relay running and ESP32 connected. Log in as aegixcore through SSH or
 the text console. Do not run this as operator or from a root login shell.
 
 ```bash
-git clone --single-branch --branch raspberrypibase-occupancy-35gb https://github.com/kusheshwapandit1483-byte/TM_cell5.git /home/aegixcore/raspberrypibase
+git clone --single-branch --branch fix/raspberrypibase-preview-recovery https://github.com/kusheshwapandit1483-byte/TM_cell5.git /home/aegixcore/raspberrypibase
 cd /home/aegixcore/raspberrypibase
 sudo bash scripts/setup-kiosk.sh --reboot
 ```
@@ -158,9 +207,13 @@ deployment. Other repositories and their source branches are unchanged.
 
 ```bash
 python3 -m unittest discover -s tests -v
+node tests/test_preview_recovery.cjs
 ```
 
 The tests exercise recording/retention, real FFmpeg segmentation, session/socket
 selection, LightDM/autostart migration, directory ownership and backup restoration.
 They do not emulate a physical Pi desktop; initial screen/camera verification on
 the device remains required. Optional Pi-side AI inference is disabled by default.
+Node is only required for the developer-side JavaScript tests, not for running
+the kiosk or its installer. Those tests include 72 simulated hours, repeated
+camera failures, stale callbacks, cleanup and signaling-request timeouts.
