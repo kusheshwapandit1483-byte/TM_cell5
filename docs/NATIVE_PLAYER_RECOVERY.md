@@ -26,15 +26,22 @@ accepted. The application service and its archive configuration are retained.
 The installer backs up its files under /var/backups/tm-camera, copies a small local
 observer extension and launcher wrapper under /usr/local/lib/tm-camera, and adds
 96-native-player.conf to the existing kiosk service. The installed session-aware
-launcher is imported unchanged; the wrapper adds only Chromium extension and
-console logging flags. The separate kiosk account and graphical session discovery
+launcher is imported unchanged; the wrapper adds only the Chromium extension flag.
+Verbose GPU logging is not enabled. The separate kiosk account and graphical session discovery
 remain in use. Only the kiosk browser restarts. Neither the recording server nor
 MediaMTX is restarted, reconfigured or replaced.
 
 The installer waits up to 40 seconds for BOTH observer heartbeat and decoded video
-progress in the new kiosk service invocation's journal. It does not report success
+progress reported directly by the dashboard to a temporary loopback HTTP receiver.
+The receiver uses a fresh nonce and an OS-assigned port, closes after verification,
+and is never installed as a service. Verification parameters are removed from the
+persistent kiosk URL after success. Browser console forwarding is not required.
+It does not report success
 merely because a service is active. If validation fails, its previous kiosk files
-are restored and the browser restarts with the prior configuration. The webpage
+are restored and the browser restarts with the prior configuration. Received
+verification stages are printed and saved to verification.json in the backup
+folder, so a failure distinguishes dashboard loading, observer loading, message
+validation and decoded-frame progress. The webpage
 still uses the original MediaMTX player. Send the reported error if it fails.
 There is no need to wait on site for a several-hour outage to install this, but
 check the picture after installation.
@@ -59,7 +66,7 @@ returning starts the native player again. Recording playback is independent.
 
 The dashboard verifies message origin, source window, generation token and numeric
 frame counters. It ignores old messages after reload. No remote debugging port,
-disabled browser security, additional web service or new WebRTC client is used.
+disabled browser security, permanent additional web service or new WebRTC client is used.
 
 The observer is scoped to loopback HTTP URLs and activates only for the pramacam
 iframe on port 8889 with the generation token. It has no background worker,
@@ -88,9 +95,11 @@ generation filtering, missing-observer behavior, frame counter fallback and
 cleanup. Python tests cover rollback preservation, verification failure rollback,
 browser-only restarts and the existing recording/storage/HTTP/deployment suite.
 
-Expected journal markers are TM_NATIVE_OBSERVER_READY and TM_NATIVE_VIDEO_PROGRESS.
-These confirm observation and real decoded progress on that particular browser;
-they are not a guarantee that no future hardware or browser failure can occur.
+Expected installation stages are dashboard-ready, parent-ready and parent-frames.
+The last two require validated messages from the observer in the native iframe.
+Optional observer-ready/observer-frames reports distinguish content-script
+startup from message validation failures. These stages confirm observation and
+decoded progress on that browser; they are not a guarantee against future failures.
 
 To disable this observer and retain the working player, run:
 

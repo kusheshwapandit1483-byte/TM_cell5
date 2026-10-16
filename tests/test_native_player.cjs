@@ -4,18 +4,20 @@ const path = require('node:path');
 const vm = require('node:vm');
 const read = (name) => fs.readFileSync(path.join(__dirname, '..', name), 'utf8');
 
-function fixture() {
+function fixture({ verification = false } = {}) {
   let now = 0, serial = 0;
   const timers = new Map(), events = new Map(), frameEvents = new Map();
-  const loads = [], log = [], waiting = [];
+  const loads = [], log = [], waiting = [], reports = [];
   const frame = { contentWindow: {},
     addEventListener: (key, fn) => frameEvents.set(key, fn),
     removeEventListener: (key) => frameEvents.delete(key),
     set src(value) { loads.push(value); },
   };
-  const context = { URL, Date, performance: { now: () => now }, document: { hidden: false },
+  const context = { URL, URLSearchParams, Date, AbortController, performance: { now: () => now }, document: { hidden: false },
+    fetch: (url) => { reports.push(url); return Promise.resolve(); },
     console: { info: (v) => log.push(v), warn: (v) => log.push(v), error: (v) => log.push(v) },
-    window: { addEventListener: (key, fn) => events.set(key, fn), removeEventListener: (key) => events.delete(key) },
+    window: { location: { search: verification ? '?tm_verify_port=12345&tm_verify_nonce=test-nonce-012345678901234' : '' },
+      addEventListener: (key, fn) => events.set(key, fn), removeEventListener: (key) => events.delete(key) },
     setInterval: (fn, delay) => { const id = ++serial; timers.set(id, { fn, due: now + delay, delay }); return id; },
     setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, due: now + delay }); return id; },
     clearTimeout: (id) => timers.delete(id), clearInterval: (id) => timers.delete(id),
@@ -37,7 +39,7 @@ function fixture() {
     player.receive({ source: frame.contentWindow, origin: 'http://127.0.0.1:8889',
       data: { kind: 'tm-native-progress', token: player.token, frames }, ...extra });
   }
-  return { player, frame, loads, log, waiting, progress, advance, timers, events, frameEvents, context };
+  return { player, frame, loads, log, waiting, reports, progress, advance, timers, events, frameEvents, context };
 }
 
 // Healthy playback for 72 simulated hours is never periodically reloaded.
@@ -88,8 +90,8 @@ function fixture() {
   f.player.destroy(); assert.equal(f.timers.size, 0);
 }
 
-function observerFixture(callbacks = true) {
-  const messages = [], intervals = new Map(), events = new Map(), callbacksById = new Map();
+function observerFixture(callbacks = true, verification = false) {
+  const messages = [], reports = [], intervals = new Map(), events = new Map(), callbacksById = new Map();
   let serial = 0, count = 0;
   const video = { readyState: 4, currentTime: 0,
     getVideoPlaybackQuality: () => ({ totalVideoFrames: count, droppedVideoFrames: 0 }) };
@@ -97,8 +99,10 @@ function observerFixture(callbacks = true) {
     video.requestVideoFrameCallback = (fn) => { const id = ++serial; callbacksById.set(id, fn); return id; };
     video.cancelVideoFrameCallback = (id) => callbacksById.delete(id);
   }
-  const context = { URLSearchParams,
-    location: { port: '8889', pathname: '/pramacam/', hostname: '127.0.0.1', search: '?tm_native_watch=test' },
+  const context = { URLSearchParams, AbortController, setTimeout, clearTimeout,
+    fetch: (url) => { reports.push(url); return Promise.resolve(); },
+    location: { port: '8889', pathname: '/pramacam/', hostname: '127.0.0.1', search: '?tm_native_watch=test' +
+      (verification ? '&tm_verify_port=12345&tm_verify_nonce=test-nonce-012345678901234' : '') },
     document: { querySelector: () => video },
     window: { parent: { postMessage: (data, origin) => messages.push({ data, origin }) },
       addEventListener: (key, fn) => events.set(key, fn) },
@@ -106,7 +110,7 @@ function observerFixture(callbacks = true) {
     clearInterval: (id) => intervals.delete(id),
   };
   vm.createContext(context); vm.runInContext(read('native-player-observer/observer.js'), context);
-  return { messages, intervals, events, callbacksById, video,
+  return { messages, reports, intervals, events, callbacksById, video,
     report: () => [...intervals.values()].forEach((fn) => fn()),
     decode: () => {
       count++;
@@ -121,6 +125,21 @@ for (const callbacks of [true, false]) {
   assert.equal(frames, 1); assert.equal(f.messages.at(-1).origin, 'http://127.0.0.1:8080');
   f.report(); assert.equal(f.messages.at(-1).data.frames, frames); // Frozen picture is not progress.
   f.events.get('pagehide')(); assert.equal(f.callbacksById.size, 0); assert.equal(f.intervals.size, 0);
+}
+// Installation reports directly, with a one-time nonce, and never depends on console forwarding.
+{
+  const f = fixture({ verification: true }); f.player.start();
+  assert.equal(new URL(f.loads[0]).searchParams.get('tm_verify_port'), '12345');
+  f.progress(0); f.progress(1); f.progress(2);
+  assert.deepEqual(f.reports.map((url) => new URL(url).pathname.split('/').at(-1)),
+    ['dashboard-ready', 'parent-ready', 'parent-frames']);
+  assert.ok(f.reports.every((url) => url.startsWith('http://127.0.0.1:12345/verify/test-nonce-012345678901234/')));
+  f.player.destroy();
+  const o = observerFixture(true, true);
+  assert.ok(o.reports[0].endsWith('/observer-ready'));
+  o.decode(); o.report(); o.report();
+  assert.equal(o.reports.length, 2); assert.ok(o.reports[1].endsWith('/observer-frames'));
+  o.events.get('pagehide')();
 }
 // Dashboard navigation really stops the iframe and resumes the same player on returning to Live.
 {

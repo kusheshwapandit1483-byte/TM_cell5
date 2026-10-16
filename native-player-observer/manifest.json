@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TM native camera frame observer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reports video frame progress from the existing local MediaMTX player.",
   "content_scripts": [{
     "matches": ["http://127.0.0.1/*", "http://localhost/*"],

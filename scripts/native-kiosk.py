@@ -15,7 +15,7 @@ def main():
 
     def observed_command(*args, **kwargs):
         command = original_command(*args, **kwargs)
-        return command + [f"--load-extension={extension}", "--enable-logging=stderr", "--log-level=0"]
+        return command + [f"--load-extension={extension}"]
 
     runner.chromium_command = observed_command
     runner.run()

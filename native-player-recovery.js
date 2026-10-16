@@ -4,6 +4,7 @@ class NativePlayerRecovery {
     this.frame = frame; this.url = new URL(url); this.onWaiting = onWaiting;
     this.url.pathname = this.url.pathname.replace(/\/?$/, "/");
     this.active = false; this.destroyed = false; this.failures = 0;
+    this.verificationSent = new Set();
     this.retryTimer = null; this.serial = 0;
     this.message = (event) => this.receive(event);
     this.online = () => { if (this.active) this.load(); };
@@ -14,6 +15,19 @@ class NativePlayerRecovery {
     frame.addEventListener("load", this.loaded);
     frame.addEventListener("error", this.error);
     this.timer = setInterval(() => this.check(), 1000);
+    this.reportVerification("dashboard-ready");
+  }
+  reportVerification(stage) {
+    const params = new URLSearchParams(window.location?.search || "");
+    const port = params.get("tm_verify_port"), nonce = params.get("tm_verify_nonce");
+    if (!/^\d{1,5}$/.test(port || "") || Number(port) < 1 || Number(port) > 65535
+        || !/^[A-Za-z0-9_-]{20,64}$/.test(nonce || "") || this.verificationSent.has(stage)) return;
+    this.verificationSent.add(stage);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    fetch(`http://127.0.0.1:${port}/verify/${nonce}/${stage}`, {
+      mode: "no-cors", cache: "no-store", signal: controller.signal,
+    }).catch(() => {}).finally(() => clearTimeout(timer));
   }
   start() {
     if (this.active || this.destroyed) return;
@@ -28,19 +42,28 @@ class NativePlayerRecovery {
     this.token = `${Date.now()}-${++this.serial}`;
     const url = new URL(this.url);
     url.searchParams.set("tm_native_watch", this.token);
+    const verification = new URLSearchParams(window.location?.search || "");
+    for (const key of ["tm_verify_port", "tm_verify_nonce"]) {
+      if (verification.has(key)) url.searchParams.set(key, verification.get(key));
+    }
     this.onWaiting(true); this.frame.src = url.href;
   }
   receive(event) {
-    if (!this.active || this.retryTimer !== null || event.source !== this.frame.contentWindow
-        || event.origin !== this.url.origin) return;
+    if (!this.active || this.retryTimer !== null || event.origin !== this.url.origin) return;
     const data = event.data;
     if (!data || data.kind !== "tm-native-progress" || data.token !== this.token
         || !Number.isSafeInteger(data.frames) || data.frames < 0) return;
+    if (event.source !== this.frame.contentWindow) {
+      this.reportVerification("parent-source-rejected");
+      return;
+    }
     if (!this.observed) console.info("TM_NATIVE_OBSERVER_READY");
     this.observed = true;
+    this.reportVerification("parent-ready");
     if (data.frames > this.frames) {
       if (!this.hasFrames) console.info("TM_NATIVE_VIDEO_PROGRESS");
       this.lastFrame = performance.now(); this.hasFrames = true;
+      this.reportVerification("parent-frames");
       this.onWaiting(false);
       if (this.lastFrame - this.started >= 30000) this.failures = 0;
     }

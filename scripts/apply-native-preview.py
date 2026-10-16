@@ -2,13 +2,15 @@
 """Install frame observation around the working local iframe, restarting only the browser."""
 import json
 import os
-import re
+import secrets
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
 import time
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +19,58 @@ EXTENSION = Path("/usr/local/lib/tm-camera/native-player-observer")
 WRAPPER = Path("/usr/local/lib/tm-camera/native-kiosk.py")
 RUNNER = Path("/usr/local/lib/tm-camera/kiosk.py")
 BACKUP_ROOT = Path("/var/backups/tm-camera")
+
+
+class Verification:
+    """Temporary loopback-only receiver, independent of Chromium's logging settings."""
+    STAGES = {"dashboard-ready", "observer-ready", "observer-frames", "parent-ready", "parent-frames", "parent-source-rejected"}
+
+    def __init__(self):
+        self.nonce = secrets.token_urlsafe(24)
+        self.stages = set()
+        self.lock = threading.Lock()
+        receiver = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                prefix = f"/verify/{receiver.nonce}/"
+                stage = self.path[len(prefix):] if self.path.startswith(prefix) else ""
+                if stage not in receiver.STAGES:
+                    self.send_error(404)
+                    return
+                with receiver.lock:
+                    receiver.stages.add(stage)
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    @property
+    def parameters(self):
+        return [("tm_verify_port", str(self.server.server_port)), ("tm_verify_nonce", self.nonce)]
+
+    def snapshot(self):
+        with self.lock:
+            return sorted(self.stages)
+
+    def verified(self):
+        return {"dashboard-ready", "parent-ready", "parent-frames"}.issubset(self.snapshot())
 
 
 def show(prop):
@@ -35,8 +89,9 @@ def main():
     parts = urlsplit(environment.get("KIOSK_URL", "http://127.0.0.1:8080"))
     if parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "localhost") or parts.port != 8080:
         raise RuntimeError("This observer is scoped to the local dashboard on port 8080")
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "preview_recovery"]
-    query.append(("preview_recovery", "native1"))
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+             if key not in ("preview_recovery", "tm_verify_port", "tm_verify_nonce")]
+    query.append(("preview_recovery", "native2"))
     url = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", urlencode(query), parts.fragment))
     files = [DROPIN, WRAPPER, *(EXTENSION / name for name in ("manifest.json", "observer.js"))]
     if any(path.is_symlink() for path in files) or EXTENSION.is_symlink():
@@ -57,22 +112,33 @@ def main():
         shutil.copyfile(ROOT / "scripts/native-kiosk.py", WRAPPER)
         WRAPPER.chmod(0o644)
         DROPIN.parent.mkdir(parents=True, exist_ok=True)
-        DROPIN.write_text('[Service]\nExecStart=\nExecStart=/usr/bin/python3 ' + str(WRAPPER)
-                          + '\nEnvironment=' + json.dumps("KIOSK_URL=" + url.replace("%", "%%")) + '\n')
-        subprocess.run(["systemctl", "daemon-reload"], check=True)
-        subprocess.run(["systemctl", "restart", "tm-camera-kiosk.service"], check=True)
-        invocation = show("InvocationID")
-        if not re.fullmatch(r"[0-9a-f]{32}", invocation):
-            raise RuntimeError("Could not identify this kiosk start for verification")
-        print("Browser restarted. Checking for observer heartbeat and actual decoded frames (up to 40 seconds)...", flush=True)
-        for attempt in range(40):
-            result = subprocess.run(["journalctl", "-u", "tm-camera-kiosk.service", f"_SYSTEMD_INVOCATION_ID={invocation}", "--no-pager", "-o", "cat"], capture_output=True, text=True, check=True)
-            if "TM_NATIVE_OBSERVER_READY" in result.stdout and "TM_NATIVE_VIDEO_PROGRESS" in result.stdout:
-                subprocess.run(["systemctl", "is-active", "--quiet", "tm-camera-kiosk.service"], check=True)
-                print("Verified on this browser: original MediaMTX player, frame observer, and decoded video progress.\nRecording server and MediaMTX were not restarted. Backup: " + str(backup))
-                return
-            time.sleep(1)
-        raise RuntimeError("Could not verify observer and decoded frames; restoring previous kiosk configuration")
+        def configure(target):
+            DROPIN.write_text('[Service]\nExecStart=\nExecStart=/usr/bin/python3 ' + str(WRAPPER)
+                              + '\nEnvironment=' + json.dumps("KIOSK_URL=" + target.replace("%", "%%")) + '\n')
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+
+        with Verification() as verification:
+            checking_url = urlunsplit((parts.scheme, parts.netloc, parts.path or "/",
+                                       urlencode(query + verification.parameters), parts.fragment))
+            configure(checking_url)
+            subprocess.run(["systemctl", "restart", "tm-camera-kiosk.service"], check=True)
+            print("Browser restarted. Directly checking observer and decoded frames (up to 40 seconds)...", flush=True)
+            last = None
+            for attempt in range(40):
+                stages = verification.snapshot()
+                if stages != last:
+                    print("Verification: " + (", ".join(stages) or "waiting for dashboard"), flush=True)
+                    last = stages
+                if verification.verified():
+                    subprocess.run(["systemctl", "is-active", "--quiet", "tm-camera-kiosk.service"], check=True)
+                    configure(url)  # Future browser starts do not retain the temporary receiver URL.
+                    print("Verified on this browser: original MediaMTX player, frame observer, and decoded video progress.\nRecording server and MediaMTX were not restarted. Backup: " + str(backup))
+                    return
+                time.sleep(1)
+            stages = verification.snapshot()
+            (backup / "verification.json").write_text(json.dumps({"received": stages}) + "\n")
+            raise RuntimeError("Verification failed; received: " + (", ".join(stages) or "no dashboard reports")
+                               + ". Diagnostics: " + str(backup / "verification.json"))
     except Exception:
         for path, data in previous.items():
             if data is None:

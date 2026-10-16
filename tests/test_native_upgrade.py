@@ -5,7 +5,9 @@ import shutil
 from contextlib import ExitStack
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.error import HTTPError
+from urllib.request import build_opener, ProxyHandler
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("native_upgrade", ROOT / "scripts/upgrade-native-preview.py")
@@ -49,6 +51,13 @@ class NativeUpgradeTests(unittest.TestCase):
         stack.enter_context(patch.object(apply, "show", side_effect=lambda p: {"LoadState": "loaded", "Environment": 'KIOSK_URL=http://127.0.0.1:8080', "InvocationID": "a" * 32}[p]))
         log = "TM_NATIVE_OBSERVER_READY\nTM_NATIVE_VIDEO_PROGRESS" if ready else "observer absent"
         run = stack.enter_context(patch.object(apply.subprocess, "run", return_value=SimpleNamespace(stdout=log, returncode=0)))
+        receiver = Mock(parameters=[("tm_verify_port", "12345"), ("tm_verify_nonce", "test-nonce-012345678901234")],
+                        snapshot=Mock(return_value=["dashboard-ready", "parent-ready", "parent-frames"] if ready else []),
+                        verified=Mock(return_value=ready))
+        manager = Mock()
+        manager.__enter__ = Mock(return_value=receiver)
+        manager.__exit__ = Mock(return_value=False)
+        stack.enter_context(patch.object(apply, "Verification", return_value=manager))
         stack.enter_context(patch.object(apply.time, "sleep"))
         return root, runner, dropin, run
 
@@ -63,13 +72,29 @@ class NativeUpgradeTests(unittest.TestCase):
 
     def test_unverified_observer_restores_previous_kiosk_files(self):
         root, runner, dropin, run = self.install_fixture(False)
-        with self.assertRaisesRegex(RuntimeError, "Could not verify"):
+        with self.assertRaisesRegex(RuntimeError, "Verification failed"):
             apply.main()
         self.assertEqual(dropin.read_text(), "previous configuration")
         self.assertEqual(runner.read_text(), "original launcher")
         self.assertFalse((root / "installed/native-kiosk.py").exists())
         self.assertFalse((root / "installed/observer/manifest.json").exists())
         self.assertTrue(all("tm-camera-monitor.service" not in call.args[0] and "mediamtx.service" not in call.args[0] for call in run.call_args_list))
+
+    def test_direct_receiver_requires_current_nonce_and_actual_parent_frame_report(self):
+        opener = build_opener(ProxyHandler({}))
+        with apply.Verification() as receiver:
+            base = f"http://127.0.0.1:{receiver.server.server_port}/verify/"
+            with self.assertRaises(HTTPError) as error:
+                opener.open(base + "wrong-nonce/parent-frames", timeout=2)
+            error.exception.close()
+            self.assertEqual(receiver.snapshot(), [])
+            for stage in ("dashboard-ready", "observer-ready", "observer-frames", "parent-ready"):
+                with opener.open(base + receiver.nonce + "/" + stage, timeout=2) as response:
+                    self.assertEqual(response.status, 204)
+            self.assertFalse(receiver.verified())
+            with opener.open(base + receiver.nonce + "/parent-frames", timeout=2):
+                pass
+            self.assertTrue(receiver.verified())
 
 
 if __name__ == "__main__":
