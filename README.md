@@ -1,5 +1,9 @@
 # Raspberry Pi Base: occupancy recording and separate kiosk user
 
+For the MQTT disconnect/long-recording incident, see
+[MQTT keepalive correction](docs/MQTT_KEEPALIVE_FIX.md). This corrects skipped
+keepalive pings, verifies fresh status and checks display power as the kiosk user.
+
 This is the self-contained deployment for the special Cell 5 Raspberry Pi.
 The recording server runs as your administrator/application account (aegixcore).
 The screen automatically logs in as a separate operator account and opens the

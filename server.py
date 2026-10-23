@@ -8,6 +8,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -106,6 +107,7 @@ class ESP32StatusMonitor:
         self.host = host
         self.port = port
         self.topic = topic
+        self.client_id = "tmui" + uuid.uuid4().hex[:16]
         self.lock = threading.Lock()
         self.latest = None
         self.connected = False
@@ -152,9 +154,8 @@ class ESP32StatusMonitor:
         recorder_wake.set()
 
     def connect_packet(self):
-        client_id = f"tm-dashboard-{os.getpid()}"
         variable_header = mqtt_string("MQTT") + bytes([4, 2]) + (30).to_bytes(2, "big")
-        payload = mqtt_string(client_id)
+        payload = mqtt_string(self.client_id)
         body = variable_header + payload
         return bytes([0x10]) + mqtt_remaining_length(len(body)) + body
 
@@ -198,15 +199,15 @@ class ESP32StatusMonitor:
             if header >> 4 != 9:
                 raise ConnectionError("MQTT SUBACK failed")
             self.set_status(True, None)
-            last_ping = time.time()
+            last_ping = time.monotonic()
             while not shutdown_event.is_set():
+                now = time.monotonic()
+                if now - last_ping >= 20:
+                    self.send_ping(sock)
+                    last_ping = now
                 try:
                     header, body = read_mqtt_packet(sock)
                 except socket.timeout:
-                    now = time.time()
-                    if now - last_ping >= 20:
-                        self.send_ping(sock)
-                        last_ping = now
                     continue
                 packet_type = header >> 4
                 if packet_type == 3:
